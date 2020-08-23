@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -11,43 +12,29 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from stn import STNM
+from PIL import Image
 from tqdm import tqdm
-from tensorboardX import SummaryWriter
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True, help='cifar10 | lsun | imagenet | folder | lfw ')
-parser.add_argument('--dataroot', required=True, help='path to dataset')
 parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
-parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
+parser.add_argument('--numImages', type=int, default=10000, help='input batch size')
 parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input image to network')
 parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
 parser.add_argument('--ngf', type=int, default=64)
 parser.add_argument('--ndf', type=int, default=64)
 parser.add_argument('--ntimestep', type=int, default=2, help='number of recursive steps')
 parser.add_argument('--maxobjscale', type=float, default=1.2, help='maximal object size relative to image')
-parser.add_argument('--niter', type=int, default=25, help='number of epochs to train for')
-parser.add_argument('--epoch_s', type=int, default=0, help='start epoch for training, used for pretrained momdel')
 parser.add_argument('--session', type=int, default=1, help='training session')
-parser.add_argument('--evaluate', type=bool, default=False, help='training session')
-parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
-parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda', type=bool, default=True, help='enables cuda')
 parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
 parser.add_argument('--netG', default='', help="path to netG (to continue training)")
-parser.add_argument('--netD', default='', help="path to netD (to continue training)")
-parser.add_argument('--outf', default='.', help='folder to output images and model checkpoints')
 parser.add_argument('--outimgf', default='images', help='folder to output images checkpoints')
-parser.add_argument('--outmodelf', default='checkpoints', help='folder to model checkpoints')
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 
 opt = parser.parse_args()
 print(opt)
-
-try:
-    os.makedirs(opt.outf)
-except OSError:
-    pass
 
 if opt.manualSeed is None:
     opt.manualSeed = random.randint(1, 10000)
@@ -63,68 +50,26 @@ if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
 
 if opt.dataset in ['imagenet', 'folder', 'lfw']:
-    # folder dataset
-    dataset = dset.ImageFolder(root=opt.dataroot,
-                               transform=transforms.Compose([
-                                   transforms.Scale(opt.imageSize),
-                                   transforms.CenterCrop(opt.imageSize),
-                                   transforms.ToTensor(),
-                                   transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                               ]))
+    pass
 elif opt.dataset == 'lsun':
-    dataset = dset.LSUN(db_path=opt.dataroot, classes=['bedroom_train'],
-                        transform=transforms.Compose([
-                            transforms.Scale(opt.imageSize),
-                            transforms.CenterCrop(opt.imageSize),
-                            transforms.ToTensor(),
-                            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                        ]))
     checkfreq = 100
 elif opt.dataset == 'cifar10':
-    dataset = dset.CIFAR10(root=opt.dataroot, download=True,
-                           transform=transforms.Compose([
-                               transforms.Scale(opt.imageSize),
-                               transforms.ToTensor(),
-                               transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-                           ])
-                           )
     checkfreq = 100
     nc = 3
     rot = 0.1
 elif opt.dataset == 'cub200':
-    trans = transforms.Compose([
-        transforms.Resize((opt.imageSize, opt.imageSize)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-    dataset = dset.ImageFolder(opt.dataroot, transform=trans)
-    checkfreq = 100
+    checkfreq = 40
     writefreq = 20
     nc = 3
     rot = 0.1
 elif opt.dataset == 'mnist-one':
-    trans = transforms.Compose([
-        transforms.Scale(opt.imageSize),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-    dataset = dset.ImageFolder('datasets/mnist-one/images', transform=trans)
     checkfreq = 100
     nc = 1
     rot = 0.3
 elif opt.dataset == 'mnist-two':
-    trans = transforms.Compose([
-        transforms.Scale(opt.imageSize),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-    ])
-    dataset = dset.ImageFolder('datasets/mnist-two/images', transform=trans)
     checkfreq = 100
     nc = 1
     rot = 0.3
-assert dataset
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
-                                         shuffle=True, num_workers=int(opt.workers))
 
 ngpu = int(opt.ngpu)
 nz = int(opt.nz)
@@ -291,8 +236,8 @@ class _netG(nn.Module):
         x_r = Tin[:, 1].clamp(-rot, rot)                             # rotation for x axis ???
         x_t = Tin[:, 2].clamp(-1.0, 1.0)                             # translation for x axis ??
 
-        y_r = Tin[:, 3].clamp(-rot, rot)                             # rotation for y axis ???
-        y_s = Tin[:, 4].clamp(opt.maxobjscale, 2 * opt.maxobjscale)  # scale for y axis ???
+        y_s = Tin[:, 3].clamp(opt.maxobjscale, 2 * opt.maxobjscale)  # scale for y axis ???
+        y_r = Tin[:, 4].clamp(-rot, rot)                             # rotation for y axis ???
         y_t = Tin[:, 5].clamp(-1.0, 1.0)                             # translation for y axis ??
 
         Tout = torch.stack([x_s, x_r, x_t, y_r, y_s, y_t], dim=1)
@@ -363,7 +308,7 @@ class _netG(nn.Module):
             fgm = self.Gfgm(fgc)           # foreground mask
 
             # composition
-            fgt = self.clampT(self.Gtransform(input4g))   # Foreground transformation parameters Tensor(N, 6)
+            fgt = self.clampT(self.Gtransform(input4g)) # Foreground transformation parameters Tensor(N, 6)
             # fgg = self.Ggrid(fgt_view)                  # generate grid to transform fg in a differentiable way
             fgg = nn.functional.affine_grid(fgt.view(batchSize, 2, 3),
                                             [batchSize, nc, opt.imageSize, opt.imageSize],
@@ -389,167 +334,38 @@ if opt.netG != '':
 print(netG)
 
 
-class _netD(nn.Module):
-    def __init__(self, ngpu, nsize):
-        super(_netD, self).__init__()
-        self.ngpu = ngpu
-
-        # conv64        + lrelu64   kernel: 4x4  (nc    x 64 x 64 --> ndf   x 32 x 32)
-        # conv32 + bn32 + lrelu32   kernel: 4x4  (ndf   x 32 x 32 --> 2*ndf x 16 x 16)
-        # conv16 + bn16 + lrelu16   kernel: 4x4  (2*ndf x 16 x 16 --> 4*ndf x 8  x 8)
-        # conv8  + bn8  + lrelu8    kernel: 4x4  (4*ndf x 8  x 8  --> 8*ndf x 4  x 4)
-        # conv4  + sigmoid4         kernel: 4x4  (8*ndf x 4  x 4  --> 1)
-        self.main = self.buildNet(nsize)
-
-    def buildNet(self, nsize):
-        net = nn.Sequential()
-        depth_in = nc
-        depth_out = ndf
-        size_map = nsize
-        while size_map > 4:
-            name = str(size_map)
-            net.add_module('conv' + name, nn.Conv2d(depth_in, depth_out, 4, 2, 1, bias=False))
-            if size_map < nsize:  # TODO: why???
-                net.add_module('bn' + name, nn.BatchNorm2d(depth_out))
-            net.add_module('lrelu' + name, nn.LeakyReLU(0.2, inplace=True))
-            depth_in = depth_out
-            depth_out = 2 * depth_in
-            size_map = size_map // 2
-        name = str(size_map)
-        net.add_module('conv' + name, nn.Conv2d(depth_in, 1, 4, 1, 0, bias=False))
-        net.add_module('sigmoid' + name, nn.Sigmoid())
-        return net
-
-    def forward(self, input):
-        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
-        else:
-            output = self.main(input)
-
-        return output.view(-1, 1)
-
-
-netD = _netD(ngpu, nsize)
-# For smaller network, initialize BN as usual
-# For larger network, initialize BN with zero mean
-# The later case works for both, so we commet the initializzaton
-# netD.apply(weights_init)
-if opt.netD != '':
-    netD.load_state_dict(torch.load(opt.netD))
-print(netD)
-
-criterion = nn.BCELoss()
-
-input = torch.FloatTensor(opt.batchSize, nc, opt.imageSize, opt.imageSize)
-noise = torch.FloatTensor(ntimestep, opt.batchSize, nz)
-fixed_noise = torch.FloatTensor(ntimestep, 16, nz).normal_(0, 1)
-label = torch.FloatTensor(opt.batchSize, 1)
-real_label = 1
-fake_label = 0
+noise = torch.FloatTensor(ntimestep, 1, nz)
 
 if opt.cuda:
-    netD.cuda()
     netG.cuda()
-    criterion.cuda()
-    input, label = input.cuda(), label.cuda()
-    noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
-
-# setup optimizer
-optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-
-opt.outmodelf = os.path.join(opt.outmodelf, f"s{opt.session}")
-
-# writer
-writer = SummaryWriter(log_dir=os.path.join(opt.outmodelf))
-iteration = 0
+    noise = noise.cuda()
 
 # make dir
-os.makedirs(opt.outmodelf, exist_ok=True)
+os.makedirs(os.path.join(opt.outimgf, "images"), exist_ok=True)
+os.makedirs(os.path.join(opt.outimgf, "masks"), exist_ok=True)
+name_len = int(np.log10(opt.numImages) + 1)
+progress = tqdm(range(opt.numImages))
 
-for epoch in range(opt.epoch_s, opt.niter):
-    dataloader = tqdm(dataloader)
-    for i, data in enumerate(dataloader, 0):
-        iteration += 1
-
-        ############################
-        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
-        ###########################
-        # train with real
-        netD.zero_grad()
-        real_cpu, _ = data
-        batch_size = real_cpu.size(0)
-        if opt.cuda:
-            real_cpu = real_cpu.cuda()
-        if opt.dataset == 'mnist-one' or opt.dataset == 'mnist-two':
-            real_cpu = torch.mean(real_cpu, 1)
-        input.resize_as_(real_cpu).copy_(real_cpu)
-        label.resize_(batch_size, 1).fill_(real_label)
-        output = netD(input)
-        errD_real = criterion(output, label)
-        errD_real.backward()
-        D_x = output.data.mean()
-
+netG.eval()
+with torch.no_grad():
+    for idx in progress:
         # train with fake
-        noise.resize_(ntimestep, batch_size, nz).normal_(0, 1)
+        noise.resize_(ntimestep, 1, nz).normal_(0, 1)
         fake, fakeseq, fgimgseq, fgmaskseq = netG(noise)
-        label = label.fill_(fake_label)
-        output = netD(fake.detach())
-        errD_fake = criterion(output, label)
-        errD_fake.backward()
-        D_G_z1 = output.data.mean()
-        errD = errD_real + errD_fake
-        optimizerD.step()
 
-        ############################
-        # (2) Update G network: maximize log(D(G(z)))
-        ###########################
-        netG.zero_grad()
-        label = label.fill_(real_label)  # fake labels are real for generator cost
-        output = netD(fake)
-        errG = criterion(output, label)
-        errG.backward()
-        D_G_z2 = output.data.mean()
-        optimizerG.step()
+        # save images
+        ndarr = fake[0].add_(1.).mul_(0.5*255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
+        im = Image.fromarray(ndarr)
+        im.save(os.path.join(opt.outimgf, "images", f"{idx}".zfill(name_len) + ".png"))
 
-        dataloader.set_description(
+        # save masks
+        ndarr = fgmaskseq[-1][0].mul_(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
+        mask = Image.fromarray(np.concatenate([ndarr, ndarr, ndarr], axis=2))
+        mask.save(os.path.join(opt.outimgf, "masks", f"{idx}".zfill(name_len) + ".png"))
+
+        progress.set_description(
             (
-                "[%d][%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f"
-                % (opt.session, epoch+1, opt.niter, i+1, len(dataloader),
-                   errD.item(), errG.item(), D_x, D_G_z1, D_G_z2)
+                f"saving files at {opt.outimgf}/images(masks)/" + f"{idx}".zfill(name_len) + ".png"
             )
         )
 
-        if iteration % writefreq == 0:
-            writer.add_scalar("Loss_D", errD, global_step=iteration)
-            writer.add_scalar("Loss_G", errG, global_step=iteration)
-            writer.add_scalar("Dx", D_x, global_step=iteration)
-            writer.add_scalar("DGz1", D_G_z1, global_step=iteration)
-            writer.add_scalar("DGz2", D_G_z2, global_step=iteration)
-
-        # print('[%d][%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
-        #       % (opt.session, epoch, opt.niter, i, len(dataloader),
-        #          errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
-        if i % checkfreq == 0:
-            netG.eval()
-            with torch.no_grad():
-                fake, fakeseq, fgimgseq, fgmaskseq = netG(fixed_noise)
-            netG.train()
-            vis_set = [vutils.make_grid(fakeseq[0].add_(1).mul_(0.5), nrow=16), ]  # background
-            for t in range(1, ntimestep):
-                vis_set += [
-                    vutils.make_grid(fgimgseq[t-1].add_(1).mul_(0.5), nrow=16),
-                    vutils.make_grid(fgmaskseq[t-1], nrow=16),
-                    vutils.make_grid(fakeseq[t].add_(1).mul_(0.5), nrow=16)
-                ]
-            writer.add_image("sample", torch.cat(vis_set, dim=1), global_step=iteration)
-
-            if opt.evaluate:
-                exit()
-
-    # do checkpointing
-    if epoch % 20 == 0:
-        torch.save(netG.state_dict(), '%s/%s_netG_epoch_%d.pth' % (opt.outmodelf, opt.dataset, epoch))
-        torch.save(netD.state_dict(), '%s/%s_netD_epoch_%d.pth' % (opt.outmodelf, opt.dataset, epoch))
-
-writer.close()
